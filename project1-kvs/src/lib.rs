@@ -29,7 +29,7 @@ impl KvStore {
     pub fn get(&self, key: String) -> Option<String> {
         match self.store.get(&key) {
             Some(v) => Some(v.to_owned()),
-            None => None
+            None => None,
         }
     }
 
