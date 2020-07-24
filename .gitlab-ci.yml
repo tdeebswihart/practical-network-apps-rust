@@ -1,27 +1,21 @@
 stages:
   - build
 
+variables:
+  CARGO_HOME: "${CI_PROJECT_DIR}/.cargo"
+
 .rust-latest:
   image: rust:latest
   script:
     - cargo build --verbose
     - cargo test --verbose
 
-.rust-nightly:
-  image: rustlang/rust:nightly
-  script:
-    - cargo build --verbose
-    - cargo test --verbose
-  allow_failure: true
-
 project1-latest:
   stage: build
+  cache:
+    paths:
+      - project1-kvs/target/
+      - .cargo/
   extends: .rust-latest
-  before_script:
-    - cd project1-kvs
-
-project1-nightly:
-  stage: build
-  extends: .rust-nightly
   before_script:
     - cd project1-kvs

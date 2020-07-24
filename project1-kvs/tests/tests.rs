@@ -114,7 +114,7 @@ fn cli_invalid_subcommand() {
 
 // Should get previously stored value
 #[test]
-fn get_stored_value() {
+fn lib_get_stored_value() {
     let mut store = KvStore::new();
 
     store.set("key1".to_owned(), "value1".to_owned());
@@ -126,7 +126,7 @@ fn get_stored_value() {
 
 // Should overwrite existent value
 #[test]
-fn overwrite_value() {
+fn lib_overwrite_value() {
     let mut store = KvStore::new();
 
     store.set("key1".to_owned(), "value1".to_owned());
@@ -138,7 +138,7 @@ fn overwrite_value() {
 
 // Should get `None` when getting a non-existent key
 #[test]
-fn get_non_existent_value() {
+fn lib_get_non_existent_value() {
     let mut store = KvStore::new();
 
     store.set("key1".to_owned(), "value1".to_owned());
@@ -146,7 +146,7 @@ fn get_non_existent_value() {
 }
 
 #[test]
-fn remove_key() {
+fn lib_remove_key() {
     let mut store = KvStore::new();
 
     store.set("key1".to_owned(), "value1".to_owned());
