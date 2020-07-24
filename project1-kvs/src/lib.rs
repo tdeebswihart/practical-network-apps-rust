@@ -43,6 +43,16 @@ impl KvStore {
     /// Remove the value stored under the specified key.
     ///
     /// If nothing is stored at that key nothing happens.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use kvs::KvStore;
+    /// let mut store = KvStore::new();
+    /// store.set("my key".to_owned(), "my value".to_owned());
+    /// store.remove("my key".to_owned());
+    /// let val = store.get("my key".to_owned());
+    /// assert_eq!(val, None);
+    /// ```
     pub fn remove(&mut self, key: String) {
         self.store.remove(&key);
     }
