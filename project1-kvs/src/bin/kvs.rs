@@ -48,18 +48,22 @@ fn main() {
         println!("{}", env!("CARGO_PKG_VERSION"));
         return
     }
-    if let Some(command) = opts.commands {
-        match command {
-            Kv::Set(opts) => {
-
-            },
-            Kv::Get(opts) => {
-            },
-            Kv::Rm(opts)  => {
-
-            }
+    match opts.commands {
+        Some(Kv::Set(opts)) => {
+            eprintln!("unimplemented");
+            std::process::exit(1);
+        },
+        Some(Kv::Get(opts)) => {
+            eprintln!("unimplemented");
+            std::process::exit(1);
+        },
+        Some(Kv::Rm(opts))  => {
+            eprintln!("unimplemented");
+            std::process::exit(1);
+        },
+        None => {
+            eprintln!("missing command!");
+            std::process::exit(1);
         }
-    } else {
-        eprintln!("missing command!")
     }
 }
