@@ -3,11 +3,8 @@ extern crate structopt;
 use structopt::StructOpt;
 
 #[derive(StructOpt,Debug)]
-#[structopt(name = "kvs")]
+#[structopt(name = "kvs", about, author)]
 struct Opts {
-    #[structopt(short = "-V")]
-    version: bool,
-
     #[structopt(subcommand)]
     commands: Option<Kv>
 }
@@ -44,10 +41,6 @@ struct RmOpts {
 }
 fn main() {
     let opts = Opts::from_args();
-    if opts.version {
-        println!("{}", env!("CARGO_PKG_VERSION"));
-        return
-    }
     match opts.commands {
         Some(Kv::Set(opts)) => {
             eprintln!("unimplemented");
