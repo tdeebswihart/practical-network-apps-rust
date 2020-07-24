@@ -1,5 +1,5 @@
 [package]
-name = "project1-kvs"
+name = "kvs"
 description = "a key-value store"
 version = "0.1.0"
 authors = ["Tim Deeb-Swihart <tim@deebswih.art>"]
