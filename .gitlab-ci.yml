@@ -1,17 +1,27 @@
 stages:
   - build
 
-rust-latest:
-  stage: build
+.rust-latest:
   image: rust:latest
   script:
-    - cd kvs && cargo build --verbose
-    - cd kvs && cargo test --verbose
+    - cargo build --verbose
+    - cargo test --verbose
 
-rust-nightly:
-  stage: build
+.rust-nightly:
   image: rustlang/rust:nightly
   script:
-    - cd kvs && cargo build --verbose
-    - cd kvs && cargo test --verbose
+    - cargo build --verbose
+    - cargo test --verbose
   allow_failure: true
+
+  project1-latest:
+    stage: build
+    extends: .rust-latest
+    before_script:
+      - cd project1-kvs
+
+  project1-nightly:
+    stage: build
+    extends: .rust-nightly
+    before_script:
+      - cd project1-kvs
