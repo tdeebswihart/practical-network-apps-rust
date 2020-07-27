@@ -14,8 +14,8 @@ project1-latest:
   stage: build
   cache:
     paths:
-      - project1-kvs/target/
+      - kvs/target/
       - .cargo/
   extends: .rust-latest
   before_script:
-    - cd project1-kvs
+    - cd kvs
