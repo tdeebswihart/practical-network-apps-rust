@@ -117,6 +117,10 @@ impl KvStore {
                         // this means we're done, unfortunately.
                         break;
                     }
+                    return Err(ioerr).with_context(|| Io {
+                        action: "deserialize",
+                        offset,
+                    });
                 }
                 Err(e) => {
                     return Err(e).with_context(|| Deser { offset });
