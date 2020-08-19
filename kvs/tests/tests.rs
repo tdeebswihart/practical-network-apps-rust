@@ -179,7 +179,7 @@ fn cli_invalid_subcommand() {
 
 // Should get previously stored value.
 #[test]
-fn get_stored_value() -> Result<()> {
+fn lib_get_stored_value() -> Result<()> {
     let temp_dir = TempDir::new().expect("unable to create temporary working directory");
     let mut store = KvStore::open(temp_dir.path())?;
 
@@ -200,7 +200,7 @@ fn get_stored_value() -> Result<()> {
 
 // Should overwrite existent value.
 #[test]
-fn overwrite_value() -> Result<()> {
+fn lib_overwrite_value() -> Result<()> {
     let temp_dir = TempDir::new().expect("unable to create temporary working directory");
     let mut store = KvStore::open(temp_dir.path())?;
 
