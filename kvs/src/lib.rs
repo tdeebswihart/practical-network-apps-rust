@@ -59,9 +59,9 @@ pub enum Command {
 /// Example usage:
 /// ```rust
 /// # use kvs::KvStore;
-/// let mut store = KvStore::open("/tmp/log.kv")?;
-/// store.set("my key".to_owned(), "my value".to_owned())?;
-/// let val = store.get("my key".to_owned())?;
+/// let mut store = KvStore::open("/tmp/logd").expect("should work");
+/// store.set("my key".to_owned(), "my value".to_owned());
+/// let val = store.get("my key".to_owned()).expect("should exist");
 /// assert_eq!(val, Some("my value".to_owned()));
 ///```
 pub struct KvStore {
@@ -199,10 +199,10 @@ impl KvStore {
     /// # Example
     /// ```rust
     /// # use kvs::KvStore;
-    /// let mut store = KvStore::open("/tmp/log.kv")?;
-    /// store.set("my key".to_owned(), "my value".to_owned())?;
-    /// store.remove("my key".to_owned())?;
-    /// let val = store.get("my key".to_owned())?;
+    /// let mut store = KvStore::open("/tmp/logd").expect("should open");
+    /// store.set("my key".to_owned(), "my value".to_owned());
+    /// store.remove("my key".to_owned());
+    /// let val = store.get("my key".to_owned()).expect("shouldn't error");
     /// assert_eq!(val, None);
     /// ```
     pub fn remove(&mut self, key: String) -> Result<()> {
