@@ -223,7 +223,6 @@ impl KvStore {
 
         self.pos = self.log_wr.seek(SeekFrom::End(0)).context(LogSeek {})?;
         self.index.remove(&key.clone());
-        println!("removed {}", &key);
         debug_assert!(!self.index.contains_key(&key));
         Ok(())
     }
