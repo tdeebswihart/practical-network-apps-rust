@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 use std::collections::HashMap;
 use std::fs;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -17,8 +17,8 @@ pub enum Error {
     MkDir { source: io::Error, path: PathBuf },
     #[snafu(display("failed to open {}: {}", path.display(), source))]
     Open { source: io::Error, path: PathBuf },
-    #[snafu(display("failed to seek {}: {}", path.display(), source))]
-    LogSeek { source: io::Error, path: PathBuf },
+    #[snafu(display("failed to seek: {}", source))]
+    LogSeek { source: io::Error },
     #[snafu(display("error deserializing command at offset {}: {}", offset, source))]
     Deser { source: BsonDeError, offset: u64 },
     #[snafu(display("error serializing command {:?}: {}", cmd, source))]
@@ -84,20 +84,18 @@ impl KvStore {
             Ok(_) => {}
         };
         path.push("log.kv");
-        println!("path: {}", path.to_str().unwrap());
-        let mut log_wr =
-            BufWriter::new(File::create(&path).with_context(|| Open { path: path.clone() })?);
-        // seek until the end
-        let pos = log_wr
-            .seek(SeekFrom::End(0))
-            .with_context(|| LogSeek { path: path.clone() })?;
-        let mut log_rd = File::open(&path).with_context(|| Open { path: path.clone() })?;
+        let mut log_rd = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .create(true)
+            .open(&path)
+            .with_context(|| Open { path: path.clone() })?;
         let mut index: HashMap<String, u64> = HashMap::new();
         let mut offset: u64;
         loop {
             offset = log_rd
                 .seek(SeekFrom::Current(0))
-                .with_context(|| LogSeek { path: path.clone() })?;
+                .with_context(|| LogSeek {})?;
             match bson::Document::from_reader(&mut log_rd) {
                 Ok(doc) => {
                     let cmd: Command =
@@ -105,6 +103,7 @@ impl KvStore {
                     // Apply the command
                     match cmd {
                         Command::Set { key, val } => {
+                            println!("setting {}", &key);
                             index.insert(key, offset);
                         }
                         Command::Rm(key) => {
@@ -127,6 +126,9 @@ impl KvStore {
                 }
             }
         }
+        let mut log_wr = BufWriter::new(log_rd.try_clone().context(Open { path: path.clone() })?);
+        // seek until the end
+        let pos = log_wr.seek(SeekFrom::End(0)).with_context(|| LogSeek {})?;
         Ok(KvStore {
             log_rd,
             index,
@@ -146,7 +148,7 @@ impl KvStore {
         let offset = self.index.get(&key).unwrap().clone();
         self.log_rd
             .seek(SeekFrom::Start(offset))
-            .context(LogSeek { path: "" })?;
+            .context(LogSeek {})?;
 
         let doc = Document::from_reader(&mut self.log_rd).context(Deser { offset })?;
         let found: Command = bson::from_bson(Bson::Document(doc)).context(Deser { offset })?;
@@ -169,6 +171,11 @@ impl KvStore {
             key: key.clone(),
             val: value,
         };
+        // seek until the end
+        let pos = self
+            .log_wr
+            .seek(SeekFrom::End(0))
+            .with_context(|| LogSeek {})?;
         let bs = bson::to_bson(&cmd).context(Ser { cmd })?;
         // We know its a document
         let doc = bs.as_document().unwrap();
@@ -179,10 +186,7 @@ impl KvStore {
             offset,
         })?;
 
-        self.pos = self
-            .log_wr
-            .seek(SeekFrom::End(0))
-            .context(LogSeek { path: "" })?;
+        self.pos = self.log_wr.seek(SeekFrom::End(0)).context(LogSeek {})?;
         self.index.insert(key.clone(), offset);
         assert!(self.index.contains_key(&key));
         Ok(())
