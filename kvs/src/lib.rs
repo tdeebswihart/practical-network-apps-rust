@@ -147,7 +147,7 @@ impl KvStore {
     /// Returns `None` if the key does not exist.
     pub fn get(&mut self, key: String) -> Result<Option<String>> {
         if !self.index.contains_key(&key) {
-            return Err(Error::NotFound);
+            return Ok(None);
         }
         // Otherwise seek and get the key
         let offset = self.index.get(&key).unwrap().clone();

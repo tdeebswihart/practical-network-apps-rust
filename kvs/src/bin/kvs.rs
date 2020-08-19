@@ -1,11 +1,10 @@
 extern crate structopt;
-use env_logger::Env;
 use human_panic::setup_panic;
 use std::env;
 use std::path::PathBuf;
 use structopt::StructOpt;
 
-use kvs::{Error, KvStore, Result};
+use kvs::{KvStore, Result};
 
 #[derive(StructOpt, Debug)]
 #[structopt(name = "kvs", about, author)]
@@ -57,8 +56,8 @@ fn run(cmd: Kv, logf: impl Into<PathBuf>) -> Result<()> {
         }
         Kv::Get(opts) => {
             match store.get(opts.key)? {
-                Some(v) => println!("{}", v),
-                None => println!("Key not found"),
+                Some(v) => print!("{}", v),
+                None => print!("Key not found"),
             };
         }
         Kv::Rm(opts) => {
@@ -72,10 +71,12 @@ fn main() {
     setup_panic!();
 
     let opts = Opts::from_args();
-    let logf = opts.logfile.unwrap_or(PathBuf::from("logd"));
+    let logf = opts
+        .logfile
+        .unwrap_or(env::current_dir().expect("invalid cwd"));
     if let Some(cmd) = opts.commands {
         if let Err(e) = run(cmd, logf) {
-            eprintln!("{}", e);
+            println!("{}", e);
             std::process::exit(1);
         }
     } else {
