@@ -31,8 +31,8 @@ pub enum Error {
         source: io::Error,
         offset: u64,
     },
-    #[snafu(display("Key {} not found", key))]
-    NotFound { key: String },
+    #[snafu(display("Key not found"))]
+    NotFound,
     #[snafu(display("Expected command {} at offset {}, found {:?}", cmd, offset, found))]
     BadIndex {
         cmd: String,
@@ -90,6 +90,7 @@ impl KvStore {
             .create(true)
             .open(&path)
             .with_context(|| Open { path: path.clone() })?;
+
         let mut index: HashMap<String, u64> = HashMap::new();
         let mut offset: u64;
         loop {
@@ -102,8 +103,7 @@ impl KvStore {
                         bson::from_bson(Bson::Document(doc)).context(Deser { offset })?;
                     // Apply the command
                     match cmd {
-                        Command::Set { key, val } => {
-                            println!("setting {}", &key);
+                        Command::Set { key, val: _ } => {
                             index.insert(key, offset);
                         }
                         Command::Rm(key) => {
@@ -126,7 +126,12 @@ impl KvStore {
                 }
             }
         }
-        let mut log_wr = BufWriter::new(log_rd.try_clone().context(Open { path: path.clone() })?);
+        let mut log_wr = BufWriter::new(
+            OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .with_context(|| Open { path: path.clone() })?,
+        );
         // seek until the end
         let pos = log_wr.seek(SeekFrom::End(0)).with_context(|| LogSeek {})?;
         Ok(KvStore {
@@ -142,7 +147,7 @@ impl KvStore {
     /// Returns `None` if the key does not exist.
     pub fn get(&mut self, key: String) -> Result<Option<String>> {
         if !self.index.contains_key(&key) {
-            return Err(Error::NotFound { key });
+            return Err(Error::NotFound);
         }
         // Otherwise seek and get the key
         let offset = self.index.get(&key).unwrap().clone();
@@ -153,7 +158,7 @@ impl KvStore {
         let doc = Document::from_reader(&mut self.log_rd).context(Deser { offset })?;
         let found: Command = bson::from_bson(Bson::Document(doc)).context(Deser { offset })?;
         match found {
-            Command::Set { key, val } => Ok(Some(val)),
+            Command::Set { key: _, val } => Ok(Some(val)),
             Command::Rm(_) => Err(Error::BadIndex {
                 cmd: "Set".to_owned(),
                 offset,
@@ -171,11 +176,6 @@ impl KvStore {
             key: key.clone(),
             val: value,
         };
-        // seek until the end
-        let pos = self
-            .log_wr
-            .seek(SeekFrom::End(0))
-            .with_context(|| LogSeek {})?;
         let bs = bson::to_bson(&cmd).context(Ser { cmd })?;
         // We know its a document
         let doc = bs.as_document().unwrap();
@@ -188,7 +188,7 @@ impl KvStore {
 
         self.pos = self.log_wr.seek(SeekFrom::End(0)).context(LogSeek {})?;
         self.index.insert(key.clone(), offset);
-        assert!(self.index.contains_key(&key));
+        debug_assert!(self.index.contains_key(&key));
         Ok(())
     }
 
@@ -206,6 +206,25 @@ impl KvStore {
     /// assert_eq!(val, None);
     /// ```
     pub fn remove(&mut self, key: String) -> Result<()> {
-        unimplemented!();
+        if !self.index.contains_key(&key) {
+            return Err(Error::NotFound);
+        }
+        let offset: u64 = self.pos;
+        let cmd = Command::Rm(key.clone());
+        let bs = bson::to_bson(&cmd).context(Ser { cmd })?;
+        // We know its a document
+        let doc = bs.as_document().unwrap();
+        doc.to_writer(&mut self.log_wr)
+            .context(LogWrite { offset })?;
+        self.log_wr.flush().context(Io {
+            action: "flush".to_owned(),
+            offset,
+        })?;
+
+        self.pos = self.log_wr.seek(SeekFrom::End(0)).context(LogSeek {})?;
+        self.index.remove(&key.clone());
+        println!("removed {}", &key);
+        debug_assert!(!self.index.contains_key(&key));
+        Ok(())
     }
 }

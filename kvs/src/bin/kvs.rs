@@ -47,33 +47,39 @@ struct RmOpts {
     #[structopt(name = "KEY")]
     key: String,
 }
-fn main() -> Result<()> {
-    setup_panic!();
 
-    let opts = Opts::from_args();
-    let logf = opts.logfile.unwrap_or(PathBuf::from("logd"));
+fn run(cmd: Kv, logf: impl Into<PathBuf>) -> Result<()> {
     let mut store = KvStore::open(logf)?;
 
-    match opts.commands {
-        Some(Kv::Set(opts)) => {
+    match cmd {
+        Kv::Set(opts) => {
             store.set(opts.key, opts.value)?;
         }
-        Some(Kv::Get(opts)) => {
+        Kv::Get(opts) => {
             match store.get(opts.key)? {
                 Some(v) => println!("{}", v),
                 None => println!("Key not found"),
             };
         }
-        Some(Kv::Rm(opts)) => {
-            match store.get(opts.key.clone())? {
-                Some(_v) => store.remove(opts.key)?,
-                None => println!("Key not found"),
-            };
-        }
-        None => {
-            eprintln!("missing command!");
-            std::process::exit(1);
+        Kv::Rm(opts) => {
+            store.remove(opts.key)?;
         }
     }
     Ok(())
+}
+
+fn main() {
+    setup_panic!();
+
+    let opts = Opts::from_args();
+    let logf = opts.logfile.unwrap_or(PathBuf::from("logd"));
+    if let Some(cmd) = opts.commands {
+        if let Err(e) = run(cmd, logf) {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    } else {
+        eprintln!("missing command!");
+        std::process::exit(1);
+    }
 }
