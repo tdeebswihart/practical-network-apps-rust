@@ -28,6 +28,8 @@ pub enum Error {
         #[snafu(source(from(Error, Box::new)))]
         source: Box<Error>,
     },
+    #[snafu(display("failed to roll back to epoch {}: {}", epoch, source))]
+    RollBack { source: io::Error, epoch: u64 },
     #[snafu(display("failed to remove outdated log {}: {}", epoch, source))]
     RemoveLog { source: io::Error, epoch: u64 },
     #[snafu(display("failed to open {}: {}", path.display(), source))]
@@ -103,14 +105,31 @@ impl io::Seek for LogFile {
 }
 
 impl LogFile {
+    /// Open a new, empty log file.
+    /// Truncates the file if it already exists.
     fn new(epoch: u64, path: impl Into<PathBuf>) -> io::Result<LogFile> {
         let mut path = path.into();
         path.push(epoch.to_string());
         let mut handle = OpenOptions::new()
             .read(true)
-            .append(true)
+            .write(true)
+            .truncate(true)
             .create(true)
             .open(path)?;
+        let length = handle.seek(SeekFrom::End(0))?;
+
+        Ok(LogFile {
+            epoch,
+            handle,
+            pos: length,
+        })
+    }
+
+    /// Open an existing log file.
+    fn open(epoch: u64, path: impl Into<PathBuf>) -> io::Result<LogFile> {
+        let mut path = path.into();
+        path.push(epoch.to_string());
+        let mut handle = OpenOptions::new().read(true).append(true).open(path)?;
         let length = handle.seek(SeekFrom::End(0))?;
 
         Ok(LogFile {
@@ -221,7 +240,7 @@ impl KvStore {
                 .to_string_lossy()
                 .parse()
                 .expect("expected file to have a u64 name");
-            let lf = LogFile::new(e, path.clone()).with_context(|| Open { path: f.path() })?;
+            let lf = LogFile::open(e, path.clone()).with_context(|| Open { path: f.path() })?;
             logs.push(lf);
         }
 
@@ -298,7 +317,7 @@ impl KvStore {
         }
 
         // TODO cache log handles?
-        let mut log = LogFile::new(entry.epoch, self.path.clone()).with_context(|| Open {
+        let mut log = LogFile::open(entry.epoch, self.path.clone()).with_context(|| Open {
             path: self.path.clone(),
         })?;
 
@@ -354,30 +373,75 @@ impl KvStore {
         Ok(())
     }
 
+    fn roll_back(&mut self, epoch: u64) -> io::Result<()> {
+        let mut lpath = self.path.clone();
+        lpath.push(self.epoch.to_string());
+        fs::remove_file(lpath)?;
+        self.epoch = epoch;
+
+        // For safety's sake remove all logs files after this epoch
+        for entry in fs::read_dir(&self.path)? {
+            let f = entry?;
+            let e: u64 = f
+                .file_name()
+                .to_string_lossy()
+                .parse()
+                .expect("expected file to have a u64 name");
+
+            if e > epoch {
+                fs::remove_file(f.path())?;
+            }
+        }
+        Ok(())
+    }
+
     /// Iterate over the log files from newest to oldest, keeping the full KV map in memory
     /// Once it reaches a certain size, write to disk as a new epoch
     pub fn compact(&mut self) -> Result<()> {
+        let start_epoch = self.epoch;
+
         self.epoch += 1;
         let rm_until = self.epoch;
-        self.log = LogFile::new(self.epoch, self.path.clone()).with_context(|| Open {
-            path: self.path.clone(),
-        })?;
+        self.log = match LogFile::new(self.epoch, self.path.clone()) {
+            Ok(lf) => lf,
+            Err(e) => {
+                self.epoch = start_epoch;
+                return Err(e).context(Open {
+                    path: self.path.clone(),
+                });
+            }
+        };
 
         let keys: Vec<String> = self.index.keys().map(|k| k.clone()).collect();
 
         for key in keys {
-            if let Some(value) = self.get(key.clone())? {
+            let maybe_val = match self.get(key.clone()) {
+                Ok(v) => v,
+                Err(e) => {
+                    self.roll_back(start_epoch)
+                        .context(RollBack { epoch: start_epoch })?;
+                    return Err(e);
+                }
+            };
+            if let Some(value) = maybe_val {
                 // May rotate to a new log file. That's fine!
                 // prevent nested compaction.
                 self.mutations = 0;
-                self.set(key, value)?;
+                if let Err(e) = self.set(key, value) {
+                    self.roll_back(start_epoch)
+                        .context(RollBack { epoch: start_epoch })?;
+                    return Err(e);
+                }
             };
         }
 
+        // Remove old log files. We don't need to roll back on failure after this point
         for entry in fs::read_dir(&self.path).with_context(|| ListDir {
             path: self.path.clone(),
         })? {
-            let f = entry.expect("failed to list direntry");
+            let f = entry.with_context(|| ListDir {
+                path: self.path.clone(),
+            })?;
 
             // There is probably an easier way to do this...
             let e: u64 = f
