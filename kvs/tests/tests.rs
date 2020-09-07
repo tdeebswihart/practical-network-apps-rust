@@ -1,3 +1,5 @@
+extern crate env_logger;
+
 use assert_cmd::prelude::*;
 use kvs::{KvStore, Result};
 use predicates::ord::eq;
@@ -6,6 +8,9 @@ use std::process::Command;
 use tempfile::TempDir;
 use walkdir::WalkDir;
 
+fn init() {
+    let _ = env_logger::builder().is_test(true).try_init();
+}
 // `kvs` with no args should exit with a non-zero code.
 #[test]
 fn cli_no_args() {
@@ -180,6 +185,7 @@ fn cli_invalid_subcommand() {
 // Should get previously stored value.
 #[test]
 fn lib_get_stored_value() -> Result<()> {
+    init();
     let temp_dir = TempDir::new().expect("unable to create temporary working directory");
     let mut store = KvStore::open(temp_dir.path())?;
 
@@ -201,6 +207,7 @@ fn lib_get_stored_value() -> Result<()> {
 // Should overwrite existent value.
 #[test]
 fn lib_overwrite_value() -> Result<()> {
+    init();
     let temp_dir = TempDir::new().expect("unable to create temporary working directory");
     let mut store = KvStore::open(temp_dir.path())?;
 
@@ -221,7 +228,8 @@ fn lib_overwrite_value() -> Result<()> {
 
 // Should get `None` when getting a non-existent key.
 #[test]
-fn get_non_existent_value() -> Result<()> {
+fn lib_get_non_existent_value() -> Result<()> {
+    init();
     let temp_dir = TempDir::new().expect("unable to create temporary working directory");
     let mut store = KvStore::open(temp_dir.path())?;
 
@@ -237,7 +245,8 @@ fn get_non_existent_value() -> Result<()> {
 }
 
 #[test]
-fn remove_non_existent_key() -> Result<()> {
+fn lib_remove_non_existent_key() -> Result<()> {
+    init();
     let temp_dir = TempDir::new().expect("unable to create temporary working directory");
     let mut store = KvStore::open(temp_dir.path())?;
     assert!(store.remove("key1".to_owned()).is_err());
@@ -245,7 +254,8 @@ fn remove_non_existent_key() -> Result<()> {
 }
 
 #[test]
-fn remove_key() -> Result<()> {
+fn lib_remove_key() -> Result<()> {
+    init();
     let temp_dir = TempDir::new().expect("unable to create temporary working directory");
     let mut store = KvStore::open(temp_dir.path())?;
     store.set("key1".to_owned(), "value1".to_owned())?;
@@ -257,7 +267,8 @@ fn remove_key() -> Result<()> {
 // Insert data until total size of the directory decreases.
 // Test data correctness after compaction.
 #[test]
-fn compaction() -> Result<()> {
+fn lib_compaction() -> Result<()> {
+    init();
     let temp_dir = TempDir::new().expect("unable to create temporary working directory");
     let mut store = KvStore::open(temp_dir.path())?;
 
