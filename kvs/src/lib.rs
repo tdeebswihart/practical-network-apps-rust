@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 #[derive(Debug, Snafu)]
@@ -18,9 +18,21 @@ pub enum Error {
     #[snafu(display("failed to create directory {}: {}", path.display(), source))]
     MkDir { source: io::Error, path: PathBuf },
     #[snafu(display("failed to replay epoch {}: {}", epoch, source))]
-    Replay { source: Box<Error>, epoch: u64 },
+    Replay {
+        #[snafu(source(from(Error, Box::new)))]
+        source: Box<Error>,
+        epoch: u64,
+    },
+    #[snafu(display("failed to compact log: {}", source))]
+    Compact {
+        #[snafu(source(from(Error, Box::new)))]
+        source: Box<Error>,
+    },
+    #[snafu(display("failed to remove outdated log {}: {}", epoch, source))]
+    RemoveLog { source: io::Error, epoch: u64 },
     #[snafu(display("failed to open {}: {}", path.display(), source))]
     Open { source: io::Error, path: PathBuf },
+
     #[snafu(display("failed to list {}: {}", path.display(), source))]
     ListDir { source: io::Error, path: PathBuf },
     #[snafu(display("failed to seek: {}", source))]
@@ -50,8 +62,6 @@ pub enum Error {
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Log alteration commands.
-/// Note: we could probably be faster by using raw bytes and storing
-/// value_pos and value_size in the keydir instead of the command position.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Command {
     Set { key: String, val: String },
@@ -93,7 +103,8 @@ impl io::Seek for LogFile {
 }
 
 impl LogFile {
-    fn new(epoch: u64, mut path: PathBuf) -> io::Result<LogFile> {
+    fn new(epoch: u64, path: impl Into<PathBuf>) -> io::Result<LogFile> {
+        let mut path = path.into();
         path.push(epoch.to_string());
         let mut handle = OpenOptions::new()
             .read(true)
@@ -108,8 +119,9 @@ impl LogFile {
             pos: length,
         })
     }
-    // Read a command from the provided log file
-    fn read_command(&mut self, offset: u64) -> Result<Command> {
+
+    /// Read the command, if any, stored at the provided offset.
+    fn retrieve(&mut self, offset: u64) -> Result<Command> {
         self.seek(SeekFrom::Start(offset))
             .with_context(|| LogSeek {})?;
         let doc = Document::from_reader(self).context(Deser { offset })?;
@@ -119,6 +131,9 @@ impl LogFile {
         Ok(found)
     }
 
+    /// Record a command to the log file.
+    ///
+    /// Returns the offset from the start of the file the command was written to.
     fn record(&mut self, cmd: Command) -> Result<u64> {
         debug!("recording {:?} in epoch {}@{}", &cmd, self.epoch, self.pos);
         let bs = bson::to_bson(&cmd).context(Ser { cmd })?;
@@ -141,7 +156,7 @@ impl LogFile {
         self.seek(SeekFrom::Start(0)).with_context(|| LogSeek {})?;
         while self.pos < length {
             let offset = self.pos;
-            let cmd = self.read_command(self.pos)?;
+            let cmd = self.retrieve(self.pos)?;
             callback(cmd, offset);
         }
         Ok(())
@@ -154,6 +169,8 @@ struct KeyEntry {
 }
 
 type KeyDir = HashMap<String, KeyEntry>;
+
+const DEFAULT_MAX_LOG_SIZE: u64 = 10_000_000; // 10MB
 
 /// A string to string key-value store
 ///
@@ -176,10 +193,14 @@ pub struct KvStore {
     // TODO: keep an LRU cache of file handles, keyed by epoch?
     // readers: HashMap<u64, File>
     epoch: u64,
+    max_log_size: u64,
+    // These tests require us to trigger compaction. I'd rather push that up to another layer, but to get it over with
+    // we'll trigger compaction after every 100 removals or overwrites.
+    mutations: u64,
 }
 
 impl KvStore {
-    pub fn open(path: impl Into<PathBuf>) -> Result<KvStore> {
+    pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
 
         if let Err(e) = fs::create_dir_all(&path) {
@@ -219,7 +240,8 @@ impl KvStore {
                         index.remove(&key);
                     }
                 };
-            })?;
+            })
+            .context(Replay { epoch })?;
         }
 
         // Grab file for the current epoch
@@ -230,11 +252,24 @@ impl KvStore {
         };
 
         Ok(KvStore {
-            path,
             index,
+            path,
             log,
             epoch,
+            max_log_size: DEFAULT_MAX_LOG_SIZE,
+            mutations: 0,
         })
+    }
+
+    // TODO: the KvStore should either take a callback that defines when to compact, or should only compact manually.
+    fn should_compact(&self) -> bool {
+        return self.mutations > 1000;
+    }
+
+    /// Set the size after which the store will rotate to a new log file.
+    pub fn with_max_size(mut self, max_log_size: u64) -> Self {
+        self.max_log_size = max_log_size;
+        self
     }
 
     /// Retrieve the value stored at the specified key
@@ -249,7 +284,7 @@ impl KvStore {
 
         debug!("getting {} from {}@{}", &key, entry.epoch, entry.offset);
         if entry.epoch == self.epoch {
-            return match self.log.read_command(entry.offset)? {
+            return match self.log.retrieve(entry.offset)? {
                 Command::Set { key: k2, val } => {
                     debug_assert!(key == k2, "found a set for the wrong key");
                     Ok(Some(val))
@@ -261,12 +296,13 @@ impl KvStore {
                 }),
             };
         }
+
         // TODO cache log handles?
         let mut log = LogFile::new(entry.epoch, self.path.clone()).with_context(|| Open {
             path: self.path.clone(),
         })?;
 
-        match log.read_command(entry.offset)? {
+        match log.retrieve(entry.offset)? {
             Command::Set { key: k2, val } => {
                 debug_assert!(key == k2, "found a set for the wrong key");
                 Ok(Some(val))
@@ -289,13 +325,71 @@ impl KvStore {
         };
 
         let offset = self.log.record(cmd)?;
-        self.index.insert(
+        let previous = self.index.insert(
             key,
             KeyEntry {
                 epoch: self.epoch,
                 offset,
             },
         );
+
+        if previous.is_some() {
+            self.mutations += 1;
+            if self.should_compact() {
+                return self.compact().context(Compact);
+            }
+        }
+
+        if self.log.pos < self.max_log_size {
+            return Ok(());
+        }
+
+        // New epoch
+        self.epoch += 1;
+        debug!("beginning epoch {}", self.epoch);
+        self.log = LogFile::new(self.epoch, self.path.clone()).with_context(|| Open {
+            path: self.path.clone(),
+        })?;
+
+        Ok(())
+    }
+
+    /// Iterate over the log files from newest to oldest, keeping the full KV map in memory
+    /// Once it reaches a certain size, write to disk as a new epoch
+    pub fn compact(&mut self) -> Result<()> {
+        self.epoch += 1;
+        let rm_until = self.epoch;
+        self.log = LogFile::new(self.epoch, self.path.clone()).with_context(|| Open {
+            path: self.path.clone(),
+        })?;
+
+        let keys: Vec<String> = self.index.keys().map(|k| k.clone()).collect();
+
+        for key in keys {
+            if let Some(value) = self.get(key.clone())? {
+                // May rotate to a new log file. That's fine!
+                // prevent nested compaction.
+                self.mutations = 0;
+                self.set(key, value)?;
+            };
+        }
+
+        for entry in fs::read_dir(&self.path).with_context(|| ListDir {
+            path: self.path.clone(),
+        })? {
+            let f = entry.expect("failed to list direntry");
+
+            // There is probably an easier way to do this...
+            let e: u64 = f
+                .file_name()
+                .to_string_lossy()
+                .parse()
+                .expect("expected file to have a u64 name");
+            if e < rm_until {
+                // remove the file
+                fs::remove_file(f.path()).context(RemoveLog { epoch: e })?;
+            }
+        }
         Ok(())
     }
 
@@ -319,6 +413,11 @@ impl KvStore {
         let cmd = Command::Rm(key.clone());
         self.log.record(cmd)?;
         self.index.remove(&key);
+
+        self.mutations += 1;
+        if self.should_compact() {
+            return self.compact().context(Compact);
+        }
         Ok(())
     }
 }

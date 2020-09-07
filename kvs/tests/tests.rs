@@ -270,7 +270,7 @@ fn lib_remove_key() -> Result<()> {
 fn lib_compaction() -> Result<()> {
     init();
     let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-    let mut store = KvStore::open(temp_dir.path())?;
+    let mut store = KvStore::open(temp_dir.path())?.with_max_size(1000);
 
     let dir_size = || {
         let entries = WalkDir::new(temp_dir.path()).into_iter();
