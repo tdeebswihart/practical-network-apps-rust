@@ -12,7 +12,7 @@ struct Opts {
     #[structopt(subcommand)]
     commands: Option<Kv>,
 
-    #[structopt(short = "f", long = "file", env = "LOG_FILE")]
+    #[structopt(short = "f", long = "file", env = "LOG_DIR")]
     logfile: Option<PathBuf>,
 }
 

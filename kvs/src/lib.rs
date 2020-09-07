@@ -1,7 +1,9 @@
+#[macro_use]
+extern crate log;
+
 use bson::de::Error as BsonDeError;
 use bson::ser::Error as BsonSerError;
 use bson::{Bson, Document};
-use log::info;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 use std::collections::HashMap;
@@ -15,6 +17,8 @@ use std::path::PathBuf;
 pub enum Error {
     #[snafu(display("failed to create directory {}: {}", path.display(), source))]
     MkDir { source: io::Error, path: PathBuf },
+    #[snafu(display("failed to replay epoch {}: {}", epoch, source))]
+    Replay { source: Box<Error>, epoch: u64 },
     #[snafu(display("failed to open {}: {}", path.display(), source))]
     Open { source: io::Error, path: PathBuf },
     #[snafu(display("failed to seek: {}", source))]
@@ -52,6 +56,17 @@ pub enum Command {
     Rm(String),
 }
 
+struct KeyEntry {
+    epoch: u64,
+    offset: u64,
+}
+
+type KeyDir = HashMap<String, KeyEntry>;
+
+struct Log {
+    epoch: u64,
+    path: PathBuf,
+}
 /// A string to string key-value store
 ///
 /// Key-value pairs are stored in a single log file on disk.
@@ -66,15 +81,60 @@ pub enum Command {
 ///```
 pub struct KvStore {
     // TODO: keep multiple log files?
-    index: HashMap<String, u64>,
-    log_wr: BufWriter<File>,
-    log_rd: File,
+    index: KeyDir,
+    logdir: PathBuf,
+    // Writer for the current epoch
+    wr: BufWriter<File>,
+    // TODO: keep an LRU cache of file handles, keyed by epoch?
+    // readers: HashMap<u64, File>
+    epoch: u64,
     pos: u64,
+}
+
+// Read a command from the provided log file
+fn read_command<T: io::Read + io::Seek>(rdr: &mut T, offset: u64) -> Result<Command> {
+    let doc = Document::from_reader(rdr).context(Deser { offset })?;
+    let found: Command = bson::from_bson(Bson::Document(doc)).context(Deser { offset })?;
+    debug!("read {:?}@{}", &found, offset);
+    Ok(found)
+}
+
+fn replay(log: Log, index: &mut KeyDir) -> Result<()> {
+    let mut rd = OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .open(&log.path)
+        .with_context(|| Open {
+            path: log.path.clone(),
+        })?;
+
+    debug!("replaying epoch {}", log.epoch);
+    let length = rd.seek(SeekFrom::End(0)).with_context(|| LogSeek {})?;
+    let mut offset = rd.seek(SeekFrom::Start(0)).with_context(|| LogSeek {})?;
+    while offset < length {
+        match read_command(&mut rd, offset)? {
+            Command::Set { key, val: _ } => {
+                index.insert(
+                    key,
+                    KeyEntry {
+                        epoch: log.epoch,
+                        offset,
+                    },
+                );
+            }
+            Command::Rm(key) => {
+                index.remove(&key);
+            }
+        };
+        offset = rd.seek(SeekFrom::Current(0)).with_context(|| LogSeek {})?;
+    }
+    Ok(())
 }
 
 impl KvStore {
     pub fn open(path: impl Into<PathBuf>) -> Result<KvStore> {
-        let mut path = path.into();
+        let path = path.into();
         match fs::create_dir_all(&path) {
             Err(e) => {
                 if e.kind() != io::ErrorKind::AlreadyExists {
@@ -83,62 +143,53 @@ impl KvStore {
             }
             Ok(_) => {}
         };
-        path.push("log.kv");
-        let mut log_rd = OpenOptions::new()
-            .read(true)
-            .append(true)
-            .create(true)
-            .open(&path)
-            .with_context(|| Open { path: path.clone() })?;
+        // TODO: list files in the directory. Sort by epoch, and replay from oldest to newest
+        let mut index = KeyDir::new();
+        let mut logs = Vec::<Log>::new();
+        for entry in fs::read_dir(&path).context(Open { path: path.clone() })? {
+            let f = entry.expect("failed to list direntry");
 
-        let mut index: HashMap<String, u64> = HashMap::new();
-        let mut offset: u64;
-        loop {
-            offset = log_rd
-                .seek(SeekFrom::Current(0))
-                .with_context(|| LogSeek {})?;
-            match bson::Document::from_reader(&mut log_rd) {
-                Ok(doc) => {
-                    let cmd: Command =
-                        bson::from_bson(Bson::Document(doc)).context(Deser { offset })?;
-                    // Apply the command
-                    match cmd {
-                        Command::Set { key, val: _ } => {
-                            index.insert(key, offset);
-                        }
-                        Command::Rm(key) => {
-                            index.remove(&key);
-                        }
-                    }
-                }
-                Err(bson::de::Error::IoError(ioerr)) => {
-                    if ioerr.kind() == std::io::ErrorKind::UnexpectedEof {
-                        // this means we're done, unfortunately.
-                        break;
-                    }
-                    return Err(ioerr).with_context(|| Io {
-                        action: "deserialize",
-                        offset,
-                    });
-                }
-                Err(e) => {
-                    return Err(e).with_context(|| Deser { offset });
-                }
-            }
+            // There is probably an easier way to do this...
+            let e: u64 = f
+                .file_name()
+                .to_string_lossy()
+                .parse()
+                .expect("expected file to have a u64 name");
+            logs.push(Log {
+                epoch: e,
+                path: f.path(),
+            });
         }
-        let mut log_wr = BufWriter::new(
+        logs.sort_unstable_by(|a, b| a.epoch.partial_cmp(&b.epoch).unwrap());
+
+        let mut epoch: u64 = 0;
+        for log in logs {
+            epoch = log.epoch;
+            debug!("replaying log for epoch {}", epoch);
+            replay(log, &mut index)?;
+        }
+        // Open a new file
+        let mut latest = path.clone();
+        latest.push(epoch.to_string());
+
+        let mut wr = BufWriter::new(
             OpenOptions::new()
                 .append(true)
-                .open(&path)
-                .with_context(|| Open { path: path.clone() })?,
+                .create(true)
+                .open(&latest)
+                .with_context(|| Open {
+                    path: latest.clone(),
+                })?,
         );
         // seek until the end
-        let pos = log_wr.seek(SeekFrom::End(0)).with_context(|| LogSeek {})?;
+        let pos = wr.seek(SeekFrom::End(0)).with_context(|| LogSeek {})?;
+        let logdir = path.clone().into();
         Ok(KvStore {
-            log_rd,
+            logdir,
             index,
-            log_wr,
+            wr,
             pos,
+            epoch,
         })
     }
 
@@ -150,19 +201,19 @@ impl KvStore {
             return Ok(None);
         }
         // Otherwise seek and get the key
-        let offset = self.index.get(&key).unwrap().clone();
-        self.log_rd
-            .seek(SeekFrom::Start(offset))
-            .context(LogSeek {})?;
+        let entry = self.index.get(&key).unwrap().clone();
+        let mut path = self.logdir.clone();
+        path.push(entry.epoch.to_string());
 
-        let doc = Document::from_reader(&mut self.log_rd).context(Deser { offset })?;
-        let found: Command = bson::from_bson(Bson::Document(doc)).context(Deser { offset })?;
-        match found {
+        let mut rd = File::open(path.clone()).with_context(|| Open { path: path.clone() })?;
+        rd.seek(SeekFrom::Start(entry.offset)).context(LogSeek {})?;
+
+        match read_command(&mut rd, entry.offset)? {
             Command::Set { key: _, val } => Ok(Some(val)),
-            Command::Rm(_) => Err(Error::BadIndex {
+            Command::Rm(k) => Err(Error::BadIndex {
                 cmd: "Set".to_owned(),
-                offset,
-                found,
+                offset: entry.offset,
+                found: Command::Rm(k),
             }),
         }
     }
@@ -172,6 +223,7 @@ impl KvStore {
     /// If a value is already stored at this key it is unceremoniously overwritten.
     pub fn set(&mut self, key: String, value: String) -> Result<()> {
         let offset: u64 = self.pos;
+        debug!("writing Set({},{}) into epoch {}", &key, &value, self.epoch);
         let cmd = Command::Set {
             key: key.clone(),
             val: value,
@@ -179,16 +231,21 @@ impl KvStore {
         let bs = bson::to_bson(&cmd).context(Ser { cmd })?;
         // We know its a document
         let doc = bs.as_document().unwrap();
-        doc.to_writer(&mut self.log_wr)
-            .context(LogWrite { offset })?;
-        self.log_wr.flush().context(Io {
+        doc.to_writer(&mut self.wr).context(LogWrite { offset })?;
+        self.wr.flush().context(Io {
             action: "flush".to_owned(),
             offset,
         })?;
 
-        self.pos = self.log_wr.seek(SeekFrom::End(0)).context(LogSeek {})?;
-        self.index.insert(key.clone(), offset);
-        debug_assert!(self.index.contains_key(&key));
+        self.pos = self.wr.seek(SeekFrom::End(0)).context(LogSeek {})?;
+        debug!("wrote Set({}) into epoch {}@{}", &key, self.epoch, offset);
+        self.index.insert(
+            key,
+            KeyEntry {
+                epoch: self.epoch,
+                offset,
+            },
+        );
         Ok(())
     }
 
@@ -210,20 +267,20 @@ impl KvStore {
             return Err(Error::NotFound);
         }
         let offset: u64 = self.pos;
+        debug!("writing Rm({}) into epoch {}@{}", &key, self.epoch, offset);
+
         let cmd = Command::Rm(key.clone());
         let bs = bson::to_bson(&cmd).context(Ser { cmd })?;
         // We know its a document
         let doc = bs.as_document().unwrap();
-        doc.to_writer(&mut self.log_wr)
-            .context(LogWrite { offset })?;
-        self.log_wr.flush().context(Io {
+        doc.to_writer(&mut self.wr).context(LogWrite { offset })?;
+        self.wr.flush().context(Io {
             action: "flush".to_owned(),
             offset,
         })?;
 
-        self.pos = self.log_wr.seek(SeekFrom::End(0)).context(LogSeek {})?;
-        self.index.remove(&key.clone());
-        debug_assert!(!self.index.contains_key(&key));
+        self.pos = self.wr.seek(SeekFrom::End(0)).context(LogSeek {})?;
+        self.index.remove(&key);
         Ok(())
     }
 }
