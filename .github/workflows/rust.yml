@@ -1,0 +1,37 @@
+name: Rust
+
+on:
+  push:
+    branches: [ trunk ]
+  pull_request:
+    branches: [ trunk ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_HOME: ~/.cargo
+    steps:
+    - name: Cache cargo deps
+      uses: actions/cache@v2
+      env:
+        cache-name: cache-dot-cargo
+      with:
+        paths: |
+          ~/.cargo
+          **/target
+        key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-build-${{ env.cache-name }}-
+          ${{ runner.os }}-build-
+          ${{ runner.os }}-
+    - uses: actions/checkout@v2
+    - name: Build
+      working-directory: kvs
+      run: cargo build --verbose
+    - name: Run tests
+      working-directory: kvs
+      run: cargo test --verbose
