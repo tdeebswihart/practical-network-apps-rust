@@ -20,7 +20,7 @@ jobs:
       env:
         cache-name: cache-dot-cargo
       with:
-        paths: |
+        path: |
           ~/.cargo
           **/target
         key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
