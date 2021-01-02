@@ -374,10 +374,8 @@ impl KvStore {
     }
 
     fn roll_back(&mut self, epoch: u64) -> io::Result<()> {
-        let mut lpath = self.path.clone();
-        lpath.push(self.epoch.to_string());
-        fs::remove_file(lpath)?;
         self.epoch = epoch;
+        self.log = LogFile::open(self.epoch, self.path.clone())?;
 
         // For safety's sake remove all logs files after this epoch
         for entry in fs::read_dir(&self.path)? {
@@ -397,6 +395,12 @@ impl KvStore {
 
     /// Iterate over the log files from newest to oldest, keeping the full KV map in memory
     /// Once it reaches a certain size, write to disk as a new epoch
+    ///
+    /// Potential improvements:
+    /// 1. compact in place by reading the contents of a full log into memory, then
+    ///    overwriting its file from the beginning. This is not a "safe" operation, however,
+    ///    without first copying the unaltered log file.
+    ///    It would allow us to compact from later epochs into earlier ones, however.
     pub fn compact(&mut self) -> Result<()> {
         let start_epoch = self.epoch;
 
